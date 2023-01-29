@@ -1,8 +1,8 @@
 import random
+from z3 import z3
 from dataclasses import dataclass
 from enum import Enum
 from typing import Optional
-
 
 class ObjectType(Enum):
     COMET = 1
@@ -185,10 +185,71 @@ def execute_action(action: Action, solar_system: SolarSystem) -> SurveyResult:
 
     return SurveyResult(found)
 
-def deduce_planet_x_location(information: list[SurveyResult]) -> Optional[LocatePlanetX]:
+
+def deduce_planet_x_location(information: list[tuple[Survey, SurveyResult]]) -> Optional[LocatePlanetX]:
     # We've found Planet X if among all solutions matching our information, all have the
     # same Planet X location.
 
+    # let each X_i represent the object present in the solar system at sector i
+    X = [z3.Int(f"X_{i}") for i in range(0, NUM_SECTORS)]
+
+    def model_to_planet_x_location(model: z3.Model) -> LocatePlanetX:
+        for i in range(0, NUM_SECTORS):
+            if model[X[i]] == ObjectType.PLANET_X.value:
+                return LocatePlanetX(ObjectType(model[X[i]]),
+                                     ObjectType(model[X[prev_sector(i)]]),
+                                     ObjectType(model[X[next_sector(i)]]))
+
+        raise Exception("No Planet X found in model???")
+
+    constraints = []
+
+    # Ensure all variables have valid object type values
+    for i in range(0, NUM_SECTORS):
+        constraints.append(X[i] >= 1)
+        constraints.append(X[i] <= 6)
+
+    # Ensure object counts are correct
+    def add_object_limit_in_range(obj_type: ObjectType, count: int, sectors: range):
+        constraints.append(
+            z3.Sum(z3.If(X[i] == obj_type.value, 1, 0) for i in sectors) <= count
+        )
+
+    def add_total_object_limit(obj_type: ObjectType, count: int):
+        add_object_limit_in_range(obj_type, count, range(0, NUM_SECTORS))
+
+    add_total_object_limit(ObjectType.PLANET_X, 1)
+    add_total_object_limit(ObjectType.DWARF_PLANET, 1)
+    add_total_object_limit(ObjectType.GAS_CLOUD, 2)
+    add_total_object_limit(ObjectType.TRULY_EMPTY, 2)
+    add_total_object_limit(ObjectType.COMET, 2)
+    add_total_object_limit(ObjectType.ASTEROID, 4)
+
+    # Object relationships need to be correct
+    # TODO: write the object relationships as z3 constraints
+
+    # The real meat - our survey data needs to be taken into account
+    for survey, survey_result in information:
+        add_object_limit_in_range(survey.surveying_for,
+                                  survey_result.number_found,
+                                  range(survey.survey_start, survey.survey_end+1))
+
+    solver = z3.Solver()
+    solver.add(*constraints)
+
+    # We collect one model exhibiting each possible Planet X location
+    # If there's only one, we've found it!
+    models = []
+    while solver.check():
+        model = solver.model()
+        models.append(model)
+        location = model_to_planet_x_location(model)
+        solver.add(X[location])
+
+    if len(models) == 1:
+        return model_to_planet_x_location(models[0])
+
+    return None
 def find_planet_x(solar_system: SolarSystem) -> SearchResult:
     # The strategy here is:
     # * Always survey 4 sectors (narrowest 3 cost search)
@@ -239,10 +300,10 @@ def main():
     for i in range(0, NUM_SECTORS):
         print(f"{i+1}: {solar_system.sector_objects[i].name}")
 
-    #search_result: SearchResult = find_planet_x(solar_system)
+    search_result: SearchResult = find_planet_x(solar_system)
 
-    #print(f"Found Planet X in {search_result.time_cost} time")
-    #print(f"Solution: {search_result.actions}")
+    print(f"Found Planet X in {search_result.time_cost} time")
+    print(f"Solution: {search_result.actions}")
 
 if __name__ == "__main__":
     main()
