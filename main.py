@@ -152,8 +152,75 @@ class SearchResult:
     time_cost: int
     actions: list[Action]
 
+NUM_VISIBLE_SECTORS = NUM_SECTORS/2
+def get_possible_actions(visible_range_start: int) -> list[Action]:
+    # You can't survey for Planet X
+    surveyable_objects = set(ObjectType)
+    surveyable_objects.remove(ObjectType.PLANET_X)
+
+    # We're only going to do e.g. survey 1-4, 2-5, 3-6.
+    # TODO: Do the optimally sized survey instead of this.
+    # Right now this seems fine since narrower surveys seem to be too expensive, while wider surveys provide too little
+    # information. This opinion is subject to change.
+    survey_size = 4
+
+    return [
+        Survey(survey_object, start, start+survey_size-1)
+        for survey_object in surveyable_objects
+        for start in range(visible_range_start, visible_range_start+3)
+    ]
+
+def pick_best_action(actions: list[Action], information: list[SurveyResult]) -> Action:
+    # TODO: put a real strategy here using information theory or something cool
+    # This is obviously complete shit and uses no information.
+    return random.choice(actions)
+
+def execute_action(action: Action, solar_system: SolarSystem) -> SurveyResult:
+    assert isinstance(action, Survey)
+    found = 0
+
+    for sector in range(action.survey_start, action.survey_end+1):
+        if solar_system.sector_objects[sector] == action.surveying_for:
+            found += 1
+
+    return SurveyResult(found)
+
+def deduce_planet_x_location(information: list[SurveyResult]) -> Optional[LocatePlanetX]:
+    # We've found Planet X if among all solutions matching our information, all have the
+    # same Planet X location.
+
 def find_planet_x(solar_system: SolarSystem) -> SearchResult:
-    pass
+    # The strategy here is:
+    # * Always survey 4 sectors (narrowest 3 cost search)
+    # * Never target (because it seems too expensive compared to survey + perfect deduction)
+    # * Never research (because I don't know how the research results are generated)
+    # * Only locate Planet X when we're 100% sure
+    time = 0
+    actions: list[Action] = []
+    information: list[SurveyResult] = []
+    visible_range_start = 0
+
+    while True:
+        # TODO: This is dumb, it should be smarter
+        possible_actions = get_possible_actions(visible_range_start)
+        action = pick_best_action(possible_actions, information)
+        actions.append(action)
+
+        if isinstance(action, Survey):
+            information.append(execute_action(action, solar_system))
+
+            # cost of 4 width survey
+            # TODO: don't hardcode time values
+            time += 3
+            visible_range_start = (visible_range_start+3) % NUM_SECTORS
+
+        planet_x_location: Optional[LocatePlanetX] = deduce_planet_x_location(information)
+        if planet_x_location is not None:
+            actions.append(planet_x_location)
+            time += 5
+            break
+
+    return SearchResult(time, actions)
 
 GENERATION_ATTEMPTS = 10000
 
@@ -165,8 +232,12 @@ def main():
             break
 
     if solar_system is None:
-        print(f"failed to generate after {GENERATION_ATTEMPTS} attempts")
+        print(f"Failed to generate after {GENERATION_ATTEMPTS} attempts")
         return
+
+    print("Board:")
+    for i in range(0, NUM_SECTORS):
+        print(f"{i+1}: {solar_system.sector_objects[i].name}")
 
     #search_result: SearchResult = find_planet_x(solar_system)
 
