@@ -90,7 +90,7 @@ def value_in_set_constraint(x: z3.Int, value_set: Iterable[int]):
 
 
 def get_base_system_constraints():
-    X = [z3.BitVec(f"X_{i}", 8) for i in range(0, NUM_SECTORS)]
+    X = [z3.BitVec(f"X_{i}", 4) for i in range(0, NUM_SECTORS)]
     constraints = []
 
     # There's only one global constraint: the numbers of objects.
@@ -359,8 +359,8 @@ def main():
 
     search_result: SearchResult = find_planet_x(solar_system)
 
-    print(f"Found Planet X in {search_result.time_cost}")
     print(search_result.actions[-1])
+    print(f"Found Planet X in:\n{search_result.time_cost}")
 
 
 if __name__ == "__main__":
