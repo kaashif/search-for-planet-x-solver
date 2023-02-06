@@ -1,4 +1,5 @@
 import random
+from copy import deepcopy
 
 from z3 import z3
 from dataclasses import dataclass
@@ -219,6 +220,25 @@ def get_range_cyclic(start: int, length: int) -> Iterable[int]:
         current = next_sector(current)
 
 
+def get_all_possible_models(constraints: list, X: list[z3.BitVec]) -> list[z3.ModelRef]:
+    models = []
+    solver = z3.Solver()
+    solver.add(*constraints)
+
+    while solver.check() == z3.sat:
+        model = solver.model()
+        models.append(model)
+
+        # At least one of the variables is different
+        solver.add(
+            z3.Or([
+                x != model[x]
+                for x in X
+            ])
+        )
+
+    return models
+
 def get_possible_actions(visible_range_start: int) -> list[Action]:
     # You can't survey for Planet X
     surveyable_objects = set(ObjectType)
@@ -241,6 +261,7 @@ def pick_survey_randomly(surveys: list[Survey]) -> Survey:
     # This is obviously complete shit and uses no information.
     return random.choice(surveys)
 
+
 def pick_survey_no_repetition(surveys: list[Survey], done_surveys: set[Survey]) -> Survey:
     # It's pretty obvious that we shouldn't do the same survey twice.
     choice = None
@@ -249,6 +270,7 @@ def pick_survey_no_repetition(surveys: list[Survey], done_surveys: set[Survey]) 
         choice = random.choice(surveys)
 
     return choice
+
 
 def execute_action(action: Action, solar_system: SolarSystem) -> SurveyResult:
     assert isinstance(action, Survey)
@@ -262,11 +284,6 @@ def execute_action(action: Action, solar_system: SolarSystem) -> SurveyResult:
 
 
 def deduce_planet_x_location(constraints: list, X: list[z3.Int]) -> Optional[LocatePlanetX]:
-    # We've found Planet X if among all solutions matching our information, all have the
-    # same Planet X location.
-
-    # let each X_i represent the object present in the solar system at sector i
-
     def model_to_planet_x_location(model: z3.Model) -> LocatePlanetX:
         for i in range(0, NUM_SECTORS):
             if model[X[i]] == ObjectType.PLANET_X.value:
@@ -276,9 +293,7 @@ def deduce_planet_x_location(constraints: list, X: list[z3.Int]) -> Optional[Loc
 
         raise Exception("No Planet X found in model???")
 
-    # TODO: This is actually wrong - we don't just need a unique planet X location, we
-    # also need to know what's next to it!
-    possible_models = []
+    possible_x_location_models = []
     possible_x_locations = []
 
     solver = z3.Solver()
@@ -287,15 +302,30 @@ def deduce_planet_x_location(constraints: list, X: list[z3.Int]) -> Optional[Loc
     while True:
         if solver.check() == z3.sat:
             model = solver.model()
-            possible_models.append(model)
+            possible_x_location_models.append(model)
             location = model_to_planet_x_location(model)
             possible_x_locations.append(location.sector)
             solver.add(X[location.sector] != ObjectType.PLANET_X.value)
         else:
             break
 
-    if len(possible_models) == 1:
-        return model_to_planet_x_location(possible_models[0])
+    if len(possible_x_location_models) == 1:
+        # We've narrowed the location of Planet X down to one place, but we
+        # may still need to determine what's next to Planet X.
+        x_location = model_to_planet_x_location(possible_x_location_models[0])
+
+        p = prev_sector(x_location.sector)
+        n = next_sector(x_location.sector)
+
+        models = get_all_possible_models(constraints, X)
+
+        know_prev_sector = len(set(model[X[p]].as_long() for model in models)) == 1
+        know_next_sector = len(set(model[X[n]].as_long() for model in models)) == 1
+
+        if know_prev_sector and know_next_sector:
+            # We know where X is and what's next to X!
+            return x_location
+
 
     return None
 
@@ -365,5 +395,5 @@ def main():
 
 if __name__ == "__main__":
     z3.set_option('smt.arith.random_initial_value', True)
-    z3.set_option('smt.random_seed', int(2**32 * random.random()))
+    z3.set_option('smt.random_seed', int(2 ** 32 * random.random()))
     main()
