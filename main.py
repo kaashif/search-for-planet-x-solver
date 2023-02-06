@@ -1,5 +1,4 @@
 import random
-from time import sleep
 
 from z3 import z3
 from dataclasses import dataclass
@@ -25,7 +24,7 @@ class Action:
     pass
 
 
-@dataclass
+@dataclass(frozen=True, eq=True)
 class Survey(Action):
     surveying_for: ObjectType
     survey_start: int
@@ -91,7 +90,7 @@ def value_in_set_constraint(x: z3.Int, value_set: Iterable[int]):
 
 
 def get_base_system_constraints():
-    X = [z3.Int(f"X_{i}") for i in range(0, NUM_SECTORS)]
+    X = [z3.BitVec(f"X_{i}", 8) for i in range(0, NUM_SECTORS)]
     constraints = []
 
     # There's only one global constraint: the numbers of objects.
@@ -238,11 +237,18 @@ def get_possible_actions(visible_range_start: int) -> list[Action]:
     ]
 
 
-def pick_best_action(actions: list[Action]) -> Action:
-    # TODO: put a real strategy here using information theory or something cool
+def pick_survey_randomly(surveys: list[Survey]) -> Survey:
     # This is obviously complete shit and uses no information.
-    return random.choice(actions)
+    return random.choice(surveys)
 
+def pick_survey_no_repetition(surveys: list[Survey], done_surveys: set[Survey]) -> Survey:
+    # It's pretty obvious that we shouldn't do the same survey twice.
+    choice = None
+
+    while choice in done_surveys:
+        choice = random.choice(surveys)
+
+    return choice
 
 def execute_action(action: Action, solar_system: SolarSystem) -> SurveyResult:
     assert isinstance(action, Survey)
@@ -304,14 +310,19 @@ def find_planet_x(solar_system: SolarSystem) -> SearchResult:
     # * Only locate Planet X when we're 100% sure
     time = 0
     actions: list[Action] = []
+    action_set = set()
     constraints, X = get_base_system_constraints()
     visible_range_start = 0
 
     while True:
         # TODO: This is dumb, it should be smarter
         possible_actions = get_possible_actions(visible_range_start)
-        action = pick_best_action(possible_actions)
+
+        # TODO: this is where we need a good strategy
+        action = pick_survey_no_repetition(possible_actions, action_set)
+
         actions.append(action)
+        action_set.add(action)
 
         if isinstance(action, Survey):
             survey_result = execute_action(action, solar_system)
@@ -355,4 +366,6 @@ def main():
 
 
 if __name__ == "__main__":
+    z3.set_option('smt.arith.random_initial_value', True)
+    z3.set_option('smt.random_seed', int(2**32 * random.random()))
     main()
