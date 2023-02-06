@@ -280,19 +280,17 @@ def deduce_planet_x_location(constraints: list, X: list[z3.Int]) -> Optional[Loc
     # If there's only one, we've found it!
     possible_models = []
     possible_x_locations = []
+
+    solver = z3.Solver()
+    solver.add(*constraints)
+
     while True:
-        solver = z3.Solver()
-        solver.add(*constraints)
-
-        for loc in possible_x_locations:
-            solver.add(X[loc] != ObjectType.PLANET_X.value)
-
         if solver.check() == z3.sat:
             model = solver.model()
             possible_models.append(model)
-
             location = model_to_planet_x_location(model)
             possible_x_locations.append(location.sector)
+            solver.add(X[location.sector] != ObjectType.PLANET_X.value)
         else:
             break
 
