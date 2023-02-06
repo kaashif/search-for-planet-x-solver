@@ -170,8 +170,15 @@ def get_base_system_constraints():
         # Planet X is not adjacent to a dwarf planet.
         # In surveys and targets, the sector containing
         # Planet X appears empty.
-
-        # We already have a constraint for Planet X not being adjacent to a dwarf planet.
+        constraints.append(
+            z3.Implies(
+                X[i] == ObjectType.PLANET_X.value,
+                z3.And(
+                    X[prev_sector(i)] != ObjectType.DWARF_PLANET.value,
+                    X[next_sector(i)] != ObjectType.DWARF_PLANET.value,
+                )
+            )
+        )
 
     return constraints, X
 
