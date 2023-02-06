@@ -294,6 +294,9 @@ def deduce_planet_x_location(constraints: list, X: list[z3.Int]) -> Optional[Loc
         else:
             break
 
+    # TODO: This isn't optimal.
+    # We actually don't need to work out everything in the system, we just
+    # need to have a unique planet X location and know what's next to it.
     if len(possible_models) == 1:
         return model_to_planet_x_location(possible_models[0])
 
