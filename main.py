@@ -1,5 +1,8 @@
+import math
 import random
 from copy import deepcopy
+from functools import reduce
+from operator import mul
 
 from z3 import z3
 from dataclasses import dataclass
@@ -90,19 +93,25 @@ def value_in_set_constraint(x: z3.Int, value_set: Iterable[int]):
     return z3.Or([x == value for value in value_set])
 
 
+object_to_num_extant = {
+    ObjectType.PLANET_X: 1,
+    ObjectType.DWARF_PLANET: 1,
+    ObjectType.GAS_CLOUD: 2,
+    ObjectType.TRULY_EMPTY: 2,
+    ObjectType.COMET: 2,
+    ObjectType.ASTEROID: 4
+}
+
+
 def get_base_system_constraints():
     X = [z3.BitVec(f"X_{i}", 4) for i in range(0, NUM_SECTORS)]
     constraints = []
 
     # There's only one global constraint: the numbers of objects.
-    constraints += map(lambda args: total_object_limit_constraint(X, *args), [
-        (ObjectType.PLANET_X, 1),
-        (ObjectType.DWARF_PLANET, 1),
-        (ObjectType.GAS_CLOUD, 2),
-        (ObjectType.TRULY_EMPTY, 2),
-        (ObjectType.COMET, 2),
-        (ObjectType.ASTEROID, 4)
-    ])
+    constraints += [
+        total_object_limit_constraint(X, object_type, num)
+        for object_type, num in object_to_num_extant.items()
+    ]
 
     # Local constraints
     for i in range(0, NUM_SECTORS):
@@ -193,12 +202,7 @@ def generate_solar_system() -> SolarSystem:
     solver.check()
     model = solver.model()
 
-    objects = []
-    for i in range(0, NUM_SECTORS):
-        object = ObjectType(model[X[i]].as_long())
-        objects.append(object)
-
-    return SolarSystem(objects)
+    return model_to_system(model, X)
 
 
 @dataclass
@@ -239,6 +243,7 @@ def get_all_possible_models(constraints: list, X: list[z3.BitVec]) -> list[z3.Mo
 
     return models
 
+
 def get_possible_actions(visible_range_start: int) -> list[Action]:
     # You can't survey for Planet X
     surveyable_objects = set(ObjectType)
@@ -257,19 +262,61 @@ def get_possible_actions(visible_range_start: int) -> list[Action]:
     ]
 
 
-def pick_survey_randomly(surveys: list[Survey]) -> Survey:
-    # This is obviously complete shit and uses no information.
-    return random.choice(surveys)
+def model_to_system(model: z3.ModelRef, X) -> SolarSystem:
+    objects = []
+    for i in range(0, NUM_SECTORS):
+        object = ObjectType(model[X[i]].as_long())
+        objects.append(object)
+
+    return SolarSystem(objects)
 
 
-def pick_survey_no_repetition(surveys: list[Survey], done_surveys: set[Survey]) -> Survey:
+def expected_information_content(survey: Survey, models: list[z3.ModelRef], X) -> float:
+    result_to_num = {}
+
+    for model in models:
+        system = model_to_system(model, X)
+        result = execute_action(survey, system).number_found
+
+        result_to_num[result] = result_to_num.get(result, 0) + 1
+
+    N = len(result_to_num.keys())
+
+    information_content = -1 * math.log10(reduce(mul, [num/N for num in result_to_num.values()]))/N
+
+    return survey, information_content, result_to_num
+
+def num_distinct_results(survey: Survey, models: list[z3.ModelRef], X) -> float:
+    distinct_results = set()
+
+    for model in models:
+        system = model_to_system(model, X)
+        result = execute_action(survey, system).number_found
+        distinct_results.add(result)
+
+    return survey, len(distinct_results), distinct_results
+
+def pick_best_survey(surveys: list[Survey],
+                     done_surveys: set[Survey],
+                     found_objects: set[ObjectType],
+                     models: list[z3.ModelRef],
+                     X,
+                     evaluator) -> Survey:
     # It's pretty obvious that we shouldn't do the same survey twice.
-    choice = None
+    # We also shouldn't survey for objects we've already found
+    possible_surveys = [
+        survey for survey in surveys
+        if survey not in done_surveys
+           and survey.surveying_for not in found_objects
+    ]
 
-    while choice in done_surveys:
-        choice = random.choice(surveys)
+    evaluations = [
+        evaluator(survey, models, X) for survey in surveys
+    ]
 
-    return choice
+    best_survey, score, other = max(evaluations, key=lambda e: e[1])
+    print(other)
+    return best_survey
 
 
 def execute_action(action: Action, solar_system: SolarSystem) -> SurveyResult:
@@ -283,7 +330,9 @@ def execute_action(action: Action, solar_system: SolarSystem) -> SurveyResult:
     return SurveyResult(found)
 
 
-def deduce_planet_x_location(constraints: list, X: list[z3.Int]) -> Optional[LocatePlanetX]:
+def deduce_planet_x_location(models: list, X: list[z3.Int]) -> Optional[LocatePlanetX]:
+    print(f"num possible models = {len(models)}")
+
     def model_to_planet_x_location(model: z3.Model) -> LocatePlanetX:
         for i in range(0, NUM_SECTORS):
             if model[X[i]] == ObjectType.PLANET_X.value:
@@ -293,31 +342,16 @@ def deduce_planet_x_location(constraints: list, X: list[z3.Int]) -> Optional[Loc
 
         raise Exception("No Planet X found in model???")
 
-    possible_x_location_models = []
-    possible_x_locations = []
+    possible_x_locations = {i for model in models for i in range(0, NUM_SECTORS) if
+                            model[X[i]] == ObjectType.PLANET_X.value}
 
-    solver = z3.Solver()
-    solver.add(*constraints)
-
-    while True:
-        if solver.check() == z3.sat:
-            model = solver.model()
-            possible_x_location_models.append(model)
-            location = model_to_planet_x_location(model)
-            possible_x_locations.append(location.sector)
-            solver.add(X[location.sector] != ObjectType.PLANET_X.value)
-        else:
-            break
-
-    if len(possible_x_location_models) == 1:
+    if len(possible_x_locations) == 1:
         # We've narrowed the location of Planet X down to one place, but we
         # may still need to determine what's next to Planet X.
-        x_location = model_to_planet_x_location(possible_x_location_models[0])
+        x_location = model_to_planet_x_location(models[0])
 
         p = prev_sector(x_location.sector)
         n = next_sector(x_location.sector)
-
-        models = get_all_possible_models(constraints, X)
 
         know_prev_sector = len(set(model[X[p]].as_long() for model in models)) == 1
         know_next_sector = len(set(model[X[n]].as_long() for model in models)) == 1
@@ -326,28 +360,51 @@ def deduce_planet_x_location(constraints: list, X: list[z3.Int]) -> Optional[Loc
             # We know where X is and what's next to X!
             return x_location
 
-
     return None
 
 
-def find_planet_x(solar_system: SolarSystem) -> SearchResult:
+def find_planet_x(solar_system: SolarSystem, survey_evaluator) -> SearchResult:
     # The strategy here is:
     # * Always survey 4 sectors (narrowest 3 cost search)
     # * Never target (because it seems too expensive compared to survey + perfect deduction)
     # * Never research (because I don't know how the research results are generated)
     # * Only locate Planet X when we're 100% sure
     time = 0
+    visible_range_start = 0
     actions: list[Action] = []
+
     action_set = set()
     constraints, X = get_base_system_constraints()
-    visible_range_start = 0
 
     while True:
-        # TODO: This is dumb, it should be smarter
+        models = get_all_possible_models(constraints, X)
+        object_to_possible_locations = {
+            object_type: set()
+            for object_type in ObjectType
+        }
+        for model in models:
+            for i in range(0, NUM_SECTORS):
+                object_type = ObjectType(model[X[i]].as_long())
+                object_to_possible_locations[object_type].add(i)
+
+        # Objects we've fully determined the positions of, no need to survey for those
+        found_objects = set(object_type
+                            for object_type in ObjectType
+                            if len(object_to_possible_locations[object_type]) == object_to_num_extant[object_type])
+
+        planet_x_location: Optional[LocatePlanetX] = deduce_planet_x_location(models, X)
+
+        if planet_x_location is not None:
+            actions.append(planet_x_location)
+            time += 5
+            break
+
         possible_actions = get_possible_actions(visible_range_start)
 
         # TODO: this is where we need a good strategy
-        action = pick_survey_no_repetition(possible_actions, action_set)
+        action = pick_best_survey(
+            possible_actions, action_set, found_objects, models, X, survey_evaluator
+        )
 
         actions.append(action)
         action_set.add(action)
@@ -371,12 +428,6 @@ def find_planet_x(solar_system: SolarSystem) -> SearchResult:
 
             print(f"action: {action}, time: {time}")
 
-        planet_x_location: Optional[LocatePlanetX] = deduce_planet_x_location(constraints, X)
-        if planet_x_location is not None:
-            actions.append(planet_x_location)
-            time += 5
-            break
-
     return SearchResult(time, actions)
 
 
@@ -387,11 +438,22 @@ def main():
     for i in range(0, NUM_SECTORS):
         print(f"{i}: {solar_system.sector_objects[i].name}")
 
-    search_result: SearchResult = find_planet_x(solar_system)
+    results = {}
 
-    print(search_result.actions[-1])
-    print(f"Found Planet X in:\n{search_result.time_cost}")
+    for name, evaluator in [
+        ("max information content", expected_information_content),
+        ("most choices", num_distinct_results)
+    ]:
+        print(f"using strategy {name}")
+        search_result: SearchResult = find_planet_x(solar_system, evaluator)
 
+        print(search_result.actions[-1])
+        print(f"Found Planet X in:\n{search_result.time_cost}")
+
+        results[name] = search_result.time_cost
+
+    for name, cost in results.items():
+        print(f"{name} - cost = {cost}")
 
 if __name__ == "__main__":
     z3.set_option('smt.arith.random_initial_value', True)
