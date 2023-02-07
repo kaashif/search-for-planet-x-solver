@@ -81,7 +81,7 @@ def prev_sector(i: int) -> int:
 
 
 def object_limit_in_range_constraint(X: list[z3.Int], obj_type: ObjectType, count: int, sectors: range):
-    return sum(z3.If(X[i] == obj_type.value, 1, 0) for i in sectors) <= count
+    return sum(z3.If(X[i] == obj_type.value, 1, 0) for i in sectors) == count
 
 
 def total_object_limit_constraint(X: list[z3.Int], obj_type: ObjectType, count: int):
