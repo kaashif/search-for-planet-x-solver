@@ -1,6 +1,5 @@
 import math
 import random
-from copy import deepcopy
 from functools import reduce
 from operator import mul
 
@@ -311,7 +310,7 @@ def pick_best_survey(surveys: list[Survey],
     ]
 
     evaluations = [
-        evaluator(survey, models, X) for survey in surveys
+        evaluator(survey, models, X) for survey in possible_surveys
     ]
 
     best_survey, score, other = max(evaluations, key=lambda e: e[1])
