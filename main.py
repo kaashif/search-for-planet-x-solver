@@ -252,13 +252,19 @@ def get_possible_actions(visible_range_start: int) -> list[Action]:
     # TODO: Do the optimally sized survey instead of this.
     # Right now this seems fine since narrower surveys seem to be too expensive, while wider surveys provide too little
     # information. This opinion is subject to change.
-    survey_size = 4
+    survey_sizes = range(2, 7)
 
-    return [
-        Survey(survey_object, start, survey_size)
-        for survey_object in surveyable_objects
-        for start in get_range_cyclic(visible_range_start, 3)
-    ]
+    surveys = []
+
+    for survey_size in survey_sizes:
+        num_start_positions = 7 - survey_size
+        surveys += [
+            Survey(survey_object, start, survey_size)
+            for survey_object in surveyable_objects
+            for start in get_range_cyclic(visible_range_start, num_start_positions)
+        ]
+
+    return surveys
 
 
 def model_to_system(model: z3.ModelRef, X) -> SolarSystem:
@@ -270,7 +276,16 @@ def model_to_system(model: z3.ModelRef, X) -> SolarSystem:
     return SolarSystem(objects)
 
 
-def expected_information_content(survey: Survey, models: list[z3.ModelRef], X) -> float:
+def survey_cost(survey: Survey) -> int:
+    if 1 <= survey.survey_size <= 3:
+        return 4
+    if 4 <= survey.survey_size <= 6:
+        return 3
+    else:
+        raise Exception("the fuck kind of survey is this?")
+
+
+def expected_information_content_per_time(survey: Survey, models: list[z3.ModelRef], X) -> float:
     result_to_num = {}
 
     for model in models:
@@ -281,9 +296,14 @@ def expected_information_content(survey: Survey, models: list[z3.ModelRef], X) -
 
     N = len(result_to_num.keys())
 
-    information_content = -1 * math.log10(reduce(mul, [num/N for num in result_to_num.values()]))/N
+    information_content = -1 * sum(
+        (num/N) * math.log10(num / N)
+        for num in result_to_num.values()
+    )
+    cost = survey_cost(survey)
 
-    return survey, information_content, result_to_num
+    return survey, information_content/cost, result_to_num
+
 
 def num_distinct_results(survey: Survey, models: list[z3.ModelRef], X) -> float:
     distinct_results = set()
@@ -294,6 +314,7 @@ def num_distinct_results(survey: Survey, models: list[z3.ModelRef], X) -> float:
         distinct_results.add(result)
 
     return survey, len(distinct_results), distinct_results
+
 
 def pick_best_survey(surveys: list[Survey],
                      done_surveys: set[Survey],
@@ -399,6 +420,7 @@ def find_planet_x(solar_system: SolarSystem, survey_evaluator) -> SearchResult:
             break
 
         possible_actions = get_possible_actions(visible_range_start)
+        print(f"possible actions: {len(possible_actions)}")
 
         # TODO: this is where we need a good strategy
         action = pick_best_survey(
@@ -420,10 +442,9 @@ def find_planet_x(solar_system: SolarSystem, survey_evaluator) -> SearchResult:
                 )
             )
 
-            # cost of 4 width survey
-            # TODO: don't hardcode time values
-            time += 3
-            visible_range_start = (visible_range_start + 3) % NUM_SECTORS
+            cost = survey_cost(action)
+            time += cost
+            visible_range_start = (visible_range_start + cost) % NUM_SECTORS
 
             print(f"action: {action}, time: {time}")
 
@@ -440,7 +461,7 @@ def main():
     results = {}
 
     for name, evaluator in [
-        ("max information content", expected_information_content),
+        ("max information content", expected_information_content_per_time),
         ("most choices", num_distinct_results)
     ]:
         print(f"using strategy {name}")
@@ -453,6 +474,7 @@ def main():
 
     for name, cost in results.items():
         print(f"{name} - cost = {cost}")
+
 
 if __name__ == "__main__":
     z3.set_option('smt.arith.random_initial_value', True)
