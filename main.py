@@ -1,11 +1,19 @@
 import math
 import random
 import time
+from copy import deepcopy
 
 from z3 import z3
 from dataclasses import dataclass
 from enum import Enum
 from typing import Optional, Iterable, Callable
+
+verbose = True
+
+
+def print_v(s):
+    if verbose:
+        print_v(s)
 
 
 class ObjectType(Enum):
@@ -238,7 +246,7 @@ def get_all_possible_models(constraints: list, X: list[z3.BitVec]) -> list[z3.Mo
         )
 
     end = time.time()
-    print(f"generating models took {end - start} seconds")
+    print_v(f"generating models took {end - start} seconds")
     return models
 
 
@@ -289,29 +297,33 @@ def survey_cost(survey: Survey) -> int:
         raise Exception("the fuck kind of survey is this?")
 
 
-def count_possible_survey_results(survey: Survey, systems: list[SolarSystem]) -> dict[int, int]:
-    result_to_num = {}
+def system_by_survey_result(survey: Survey, systems: list[SolarSystem]) -> dict[int, list[SolarSystem]]:
+    result_to_systems = {}
 
     for system in systems:
         result = execute_action(survey, system).number_found
-        result_to_num[result] = result_to_num.get(result, 0) + 1
 
-    return result_to_num
+        if result in result_to_systems:
+            result_to_systems[result].append(system)
+        else:
+            result_to_systems[result] = [system]
+
+    return result_to_systems
 
 
 def expected_information_content_per_time(survey: Survey, systems: list[SolarSystem]) -> float:
-    result_to_num = count_possible_survey_results(survey, systems)
+    result_to_systems = system_by_survey_result(survey, systems)
     num_systems = len(systems)
 
     expected_information_content = -1 * sum(
-        num_systems_with_result * (math.log2(num_systems_with_result) - math.log2(num_systems))
-        for num_systems_with_result in result_to_num.values()
+        len(systems_with_result) * (math.log2(len(systems_with_result)) - math.log2(num_systems))
+        for systems_with_result in result_to_systems.values()
     ) / num_systems
     time_cost = survey_cost(survey)
 
     return survey, \
         expected_information_content / time_cost, \
-        f"{result_to_num}\n{expected_information_content=}\n{time_cost=}"
+        f"{expected_information_content=}\n{time_cost=}"
 
 
 def num_distinct_results(survey: Survey, systems: list[z3.ModelRef]) -> float:
@@ -343,10 +355,10 @@ def pick_best_survey(surveys: list[Survey],
     ]
 
     best_survey, score, other = max(evaluations, key=lambda e: e[1])
-    print(other)
+    print_v(other)
 
     end = time.time()
-    print(f"picking best survey took {end - start} seconds")
+    print_v(f"picking best survey took {end - start} seconds")
     return best_survey
 
 
@@ -362,7 +374,7 @@ def execute_action(action: Action, solar_system: SolarSystem) -> SurveyResult:
 
 
 def deduce_planet_x_location(possible_systems: list[SolarSystem]) -> Optional[LocatePlanetX]:
-    print(f"num possible systems = {len(possible_systems)}")
+    print_v(f"num possible systems = {len(possible_systems)}")
 
     def system_to_planet_x_location(system: SolarSystem) -> LocatePlanetX:
         for i in range(0, NUM_SECTORS):
@@ -404,19 +416,11 @@ def find_planet_x(solar_system: SolarSystem, survey_evaluator: Callable,
     time = 0
     visible_range_start = 0
     actions: list[Action] = []
-
     action_set = set()
-    constraints, X = get_base_system_constraints()
+
+    possible_systems = deepcopy(all_systems)
 
     while True:
-        if len(actions) == 0:
-            possible_systems = all_systems
-        else:
-            possible_systems = [
-                model_to_system(model, X)
-                for model in get_all_possible_models(constraints, X)
-            ]
-
         object_to_possible_locations = {
             object_type: set()
             for object_type in ObjectType
@@ -441,7 +445,7 @@ def find_planet_x(solar_system: SolarSystem, survey_evaluator: Callable,
             break
 
         possible_actions = get_possible_actions(visible_range_start)
-        print(f"possible actions: {len(possible_actions)}")
+        print_v(f"possible actions: {len(possible_actions)}")
 
         best_survey = pick_best_survey(
             possible_actions, action_set, found_objects, possible_systems, survey_evaluator
@@ -450,58 +454,83 @@ def find_planet_x(solar_system: SolarSystem, survey_evaluator: Callable,
         actions.append(best_survey)
         action_set.add(best_survey)
 
-        possible_results_to_count = count_possible_survey_results(best_survey, possible_systems)
+        possible_results_to_systems = system_by_survey_result(best_survey, possible_systems)
         num_found = execute_action(best_survey, solar_system).number_found
-        prob_of_that_result = possible_results_to_count[num_found] / len(possible_systems)
+        prob_of_that_result = len(possible_results_to_systems[num_found]) / len(possible_systems)
         actual_information_content = -1 * math.log2(prob_of_that_result)
 
-        constraints.append(
-            object_limit_in_range_constraint(
-                X,
-                best_survey.surveying_for,
-                num_found,
-                get_range_cyclic(best_survey.survey_start, best_survey.survey_size)
-            )
-        )
+        possible_systems = possible_results_to_systems[num_found]
 
         cost = survey_cost(best_survey)
         time += cost
         visible_range_start = (visible_range_start + cost) % NUM_SECTORS
 
-        print(f"action: {best_survey}, time: {time}")
-        print(f"{actual_information_content=}")
-        print("")
+        print_v(f"action: {best_survey}, time: {time}")
+        print_v(f"{actual_information_content=}")
+        print_v("")
 
     return SearchResult(time, actions)
 
 
+def match_clue(system: SolarSystem) -> bool:
+    for i in range(0, NUM_SECTORS):
+        if system.sector_objects[i] == ObjectType.ASTEROID and (
+                ObjectType.DWARF_PLANET in [system.sector_objects[prev_sector(i)],
+                                            system.sector_objects[next_sector(i)]]):
+            return False
+    return True
+
+
 def main():
     all_systems: list[SolarSystem] = generate_all_systems()
-    solar_system: SolarSystem = random.choice(all_systems)
 
-    print("Board:")
-    for i in range(0, NUM_SECTORS):
-        print(f"{i}: {solar_system.sector_objects[i].name}")
+    strategies = {
+        "max information content": expected_information_content_per_time,
+        "most choices": num_distinct_results
+    }
 
-    results = {}
+    name_to_time_costs = {
+        name: [] for name in strategies.keys()
+    }
 
-    for name, evaluator in [
-        ("max information content", expected_information_content_per_time),
-        ("most choices", num_distinct_results)
-    ]:
-        print(f"using strategy {name}")
-        search_result: SearchResult = find_planet_x(solar_system, evaluator, all_systems)
+    for run in range(0, 1_000_000):
+        solar_system: SolarSystem = random.choice(all_systems)
 
-        print(search_result.actions[-1])
-        print(f"Found Planet X in: {search_result.time_cost} days")
-        print(f"num actions = {len(search_result.actions)}\n")
-        print("#" * 80)
+        print_v("Board:")
+        for i in range(0, NUM_SECTORS):
+            print_v(f"{i}: {solar_system.sector_objects[i].name}")
 
-        results[name] = search_result.time_cost
+        results = {}
 
-    for name, cost in results.items():
-        print(f"{name} - time taken = {cost}")
+        for name, evaluator in strategies.items():
+            print_v(f"using strategy {name}")
+
+            try:
+                search_result: SearchResult = find_planet_x(solar_system, evaluator, all_systems)
+            except:
+                continue
+
+            print_v(search_result.actions[-1])
+            print_v(f"Found Planet X in: {search_result.time_cost} days")
+            print_v(f"num actions = {len(search_result.actions)}\n")
+            print_v("#" * 80)
+
+            results[name] = search_result.time_cost
+
+            name_to_time_costs[name].append(search_result.time_cost)
+
+        for name, cost in results.items():
+            print_v(f"{name} - time taken = {cost}")
+
+        if run % 10 == 0:
+            print(".", end="", flush=True)
+
+        if run % 100 == 0:
+            print("")
+            for name, costs in name_to_time_costs.items():
+                print(f"{name}: avg(time) = {sum(costs) / len(costs)}")
 
 
 if __name__ == "__main__":
+    verbose = False
     main()
