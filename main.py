@@ -1,12 +1,11 @@
 import math
 import random
-from functools import reduce
-from operator import mul
+import time
 
 from z3 import z3
 from dataclasses import dataclass
 from enum import Enum
-from typing import Optional, Iterable
+from typing import Optional, Iterable, Callable
 
 
 class ObjectType(Enum):
@@ -101,6 +100,8 @@ object_to_num_extant = {
     ObjectType.ASTEROID: 4
 }
 
+legal_comet_sectors = [1, 2, 4, 6, 10]
+
 
 def get_base_system_constraints():
     X = [z3.BitVec(f"X_{i}", 4) for i in range(0, NUM_SECTORS)]
@@ -123,11 +124,10 @@ def get_base_system_constraints():
         # sectors, as indicated on your note sheet:
         # Standard Mode: 2, 3, 5, 7, or 11
         # (Expert Mode: 2, 3, 5, 7, 11, 13, or 17)
-        valid_comet_locations = [1, 2, 4, 6, 10]
         constraints.append(
             z3.Implies(
                 X[i] == ObjectType.COMET.value,
-                value_in_set_constraint(i, valid_comet_locations)
+                value_in_set_constraint(i, legal_comet_sectors)
             )
         )
 
@@ -191,17 +191,13 @@ def get_base_system_constraints():
     return constraints, X
 
 
-def generate_solar_system() -> SolarSystem:
+def generate_all_systems() -> list[SolarSystem]:
     constraints, X = get_base_system_constraints()
 
-    solver = z3.Solver()
-    for constraint in constraints:
-        solver.add(constraint)
-
-    solver.check()
-    model = solver.model()
-
-    return model_to_system(model, X)
+    return [
+        model_to_system(model, X)
+        for model in get_all_possible_models(constraints, X)
+    ]
 
 
 @dataclass
@@ -210,7 +206,7 @@ class SearchResult:
     actions: list[Action]
 
 
-NUM_VISIBLE_SECTORS = NUM_SECTORS / 2
+NUM_VISIBLE_SECTORS = NUM_SECTORS // 2
 
 
 def get_range_cyclic(start: int, length: int) -> Iterable[int]:
@@ -224,6 +220,7 @@ def get_range_cyclic(start: int, length: int) -> Iterable[int]:
 
 
 def get_all_possible_models(constraints: list, X: list[z3.BitVec]) -> list[z3.ModelRef]:
+    start = time.time()
     models = []
     solver = z3.Solver()
     solver.add(*constraints)
@@ -240,6 +237,8 @@ def get_all_possible_models(constraints: list, X: list[z3.BitVec]) -> list[z3.Mo
             ])
         )
 
+    end = time.time()
+    print(f"generating models took {end - start} seconds")
     return models
 
 
@@ -248,23 +247,28 @@ def get_possible_actions(visible_range_start: int) -> list[Action]:
     surveyable_objects = set(ObjectType)
     surveyable_objects.remove(ObjectType.PLANET_X)
 
-    # We're only going to do e.g. survey 1-4, 2-5, 3-6.
-    # TODO: Do the optimally sized survey instead of this.
-    # Right now this seems fine since narrower surveys seem to be too expensive, while wider surveys provide too little
-    # information. This opinion is subject to change.
-    survey_sizes = range(2, 7)
+    survey_sizes = range(2, NUM_VISIBLE_SECTORS + 1)
 
     surveys = []
 
     for survey_size in survey_sizes:
-        num_start_positions = 7 - survey_size
+        num_start_positions = NUM_VISIBLE_SECTORS - survey_size + 1
         surveys += [
             Survey(survey_object, start, survey_size)
             for survey_object in surveyable_objects
             for start in get_range_cyclic(visible_range_start, num_start_positions)
         ]
 
-    return surveys
+    # Search for a comet must start and end on a legal comet sector
+    legal_surveys = [
+        survey
+        for survey in surveys
+        if survey.surveying_for != ObjectType.COMET
+           or (survey.survey_start in legal_comet_sectors
+               and ((survey.survey_start + survey.survey_size - 1) % NUM_SECTORS) in legal_comet_sectors)
+    ]
+
+    return legal_surveys
 
 
 def model_to_system(model: z3.ModelRef, X) -> SolarSystem:
@@ -285,31 +289,35 @@ def survey_cost(survey: Survey) -> int:
         raise Exception("the fuck kind of survey is this?")
 
 
-def expected_information_content_per_time(survey: Survey, models: list[z3.ModelRef], X) -> float:
+def count_possible_survey_results(survey: Survey, systems: list[SolarSystem]) -> dict[int, int]:
     result_to_num = {}
 
-    for model in models:
-        system = model_to_system(model, X)
+    for system in systems:
         result = execute_action(survey, system).number_found
-
         result_to_num[result] = result_to_num.get(result, 0) + 1
 
-    N = len(result_to_num.keys())
-
-    information_content = -1 * sum(
-        (num/N) * math.log10(num / N)
-        for num in result_to_num.values()
-    )
-    cost = survey_cost(survey)
-
-    return survey, information_content/cost, result_to_num
+    return result_to_num
 
 
-def num_distinct_results(survey: Survey, models: list[z3.ModelRef], X) -> float:
+def expected_information_content_per_time(survey: Survey, systems: list[SolarSystem]) -> float:
+    result_to_num = count_possible_survey_results(survey, systems)
+    num_systems = len(systems)
+
+    expected_information_content = -1 * sum(
+        num_systems_with_result * (math.log2(num_systems_with_result) - math.log2(num_systems))
+        for num_systems_with_result in result_to_num.values()
+    ) / num_systems
+    time_cost = survey_cost(survey)
+
+    return survey, \
+        expected_information_content / time_cost, \
+        f"{result_to_num}\n{expected_information_content=}\n{time_cost=}"
+
+
+def num_distinct_results(survey: Survey, systems: list[z3.ModelRef]) -> float:
     distinct_results = set()
 
-    for model in models:
-        system = model_to_system(model, X)
+    for system in systems:
         result = execute_action(survey, system).number_found
         distinct_results.add(result)
 
@@ -319,9 +327,9 @@ def num_distinct_results(survey: Survey, models: list[z3.ModelRef], X) -> float:
 def pick_best_survey(surveys: list[Survey],
                      done_surveys: set[Survey],
                      found_objects: set[ObjectType],
-                     models: list[z3.ModelRef],
-                     X,
+                     possible_systems: list[SolarSystem],
                      evaluator) -> Survey:
+    start = time.time()
     # It's pretty obvious that we shouldn't do the same survey twice.
     # We also shouldn't survey for objects we've already found
     possible_surveys = [
@@ -331,11 +339,14 @@ def pick_best_survey(surveys: list[Survey],
     ]
 
     evaluations = [
-        evaluator(survey, models, X) for survey in possible_surveys
+        evaluator(survey, possible_systems) for survey in possible_surveys
     ]
 
     best_survey, score, other = max(evaluations, key=lambda e: e[1])
     print(other)
+
+    end = time.time()
+    print(f"picking best survey took {end - start} seconds")
     return best_survey
 
 
@@ -350,31 +361,31 @@ def execute_action(action: Action, solar_system: SolarSystem) -> SurveyResult:
     return SurveyResult(found)
 
 
-def deduce_planet_x_location(models: list, X: list[z3.Int]) -> Optional[LocatePlanetX]:
-    print(f"num possible models = {len(models)}")
+def deduce_planet_x_location(possible_systems: list[SolarSystem]) -> Optional[LocatePlanetX]:
+    print(f"num possible systems = {len(possible_systems)}")
 
-    def model_to_planet_x_location(model: z3.Model) -> LocatePlanetX:
+    def system_to_planet_x_location(system: SolarSystem) -> LocatePlanetX:
         for i in range(0, NUM_SECTORS):
-            if model[X[i]] == ObjectType.PLANET_X.value:
+            if system.sector_objects[i] == ObjectType.PLANET_X:
                 return LocatePlanetX(i,
-                                     ObjectType(model[X[prev_sector(i)]].as_long()),
-                                     ObjectType(model[X[next_sector(i)]].as_long()))
+                                     system.sector_objects[prev_sector(i)],
+                                     system.sector_objects[next_sector(i)])
 
         raise Exception("No Planet X found in model???")
 
-    possible_x_locations = {i for model in models for i in range(0, NUM_SECTORS) if
-                            model[X[i]] == ObjectType.PLANET_X.value}
+    possible_x_locations = {i for system in possible_systems for i in range(0, NUM_SECTORS) if
+                            system.sector_objects[i] == ObjectType.PLANET_X}
 
     if len(possible_x_locations) == 1:
         # We've narrowed the location of Planet X down to one place, but we
         # may still need to determine what's next to Planet X.
-        x_location = model_to_planet_x_location(models[0])
+        x_location = system_to_planet_x_location(possible_systems[0])
 
         p = prev_sector(x_location.sector)
         n = next_sector(x_location.sector)
 
-        know_prev_sector = len(set(model[X[p]].as_long() for model in models)) == 1
-        know_next_sector = len(set(model[X[n]].as_long() for model in models)) == 1
+        know_prev_sector = len(set(system.sector_objects[p] for system in possible_systems)) == 1
+        know_next_sector = len(set(system.sector_objects[n] for system in possible_systems)) == 1
 
         if know_prev_sector and know_next_sector:
             # We know where X is and what's next to X!
@@ -383,7 +394,8 @@ def deduce_planet_x_location(models: list, X: list[z3.Int]) -> Optional[LocatePl
     return None
 
 
-def find_planet_x(solar_system: SolarSystem, survey_evaluator) -> SearchResult:
+def find_planet_x(solar_system: SolarSystem, survey_evaluator: Callable,
+                  all_systems: list[SolarSystem]) -> SearchResult:
     # The strategy here is:
     # * Always survey 4 sectors (narrowest 3 cost search)
     # * Never target (because it seems too expensive compared to survey + perfect deduction)
@@ -397,22 +409,31 @@ def find_planet_x(solar_system: SolarSystem, survey_evaluator) -> SearchResult:
     constraints, X = get_base_system_constraints()
 
     while True:
-        models = get_all_possible_models(constraints, X)
+        if len(actions) == 0:
+            possible_systems = all_systems
+        else:
+            possible_systems = [
+                model_to_system(model, X)
+                for model in get_all_possible_models(constraints, X)
+            ]
+
         object_to_possible_locations = {
             object_type: set()
             for object_type in ObjectType
         }
-        for model in models:
+        for system in possible_systems:
             for i in range(0, NUM_SECTORS):
-                object_type = ObjectType(model[X[i]].as_long())
+                object_type = system.sector_objects[i]
                 object_to_possible_locations[object_type].add(i)
 
-        # Objects we've fully determined the positions of, no need to survey for those
+        # Objects we've fully determined the positions of, no need to survey for those.
+        # This is really just a performance optimization, any sensible strategy would rank these surveys right
+        # at the bottom.
         found_objects = set(object_type
                             for object_type in ObjectType
                             if len(object_to_possible_locations[object_type]) == object_to_num_extant[object_type])
 
-        planet_x_location: Optional[LocatePlanetX] = deduce_planet_x_location(models, X)
+        planet_x_location: Optional[LocatePlanetX] = deduce_planet_x_location(possible_systems)
 
         if planet_x_location is not None:
             actions.append(planet_x_location)
@@ -422,37 +443,41 @@ def find_planet_x(solar_system: SolarSystem, survey_evaluator) -> SearchResult:
         possible_actions = get_possible_actions(visible_range_start)
         print(f"possible actions: {len(possible_actions)}")
 
-        # TODO: this is where we need a good strategy
-        action = pick_best_survey(
-            possible_actions, action_set, found_objects, models, X, survey_evaluator
+        best_survey = pick_best_survey(
+            possible_actions, action_set, found_objects, possible_systems, survey_evaluator
         )
 
-        actions.append(action)
-        action_set.add(action)
+        actions.append(best_survey)
+        action_set.add(best_survey)
 
-        if isinstance(action, Survey):
-            survey_result = execute_action(action, solar_system)
+        possible_results_to_count = count_possible_survey_results(best_survey, possible_systems)
+        num_found = execute_action(best_survey, solar_system).number_found
+        prob_of_that_result = possible_results_to_count[num_found] / len(possible_systems)
+        actual_information_content = -1 * math.log2(prob_of_that_result)
 
-            constraints.append(
-                object_limit_in_range_constraint(
-                    X,
-                    action.surveying_for,
-                    survey_result.number_found,
-                    get_range_cyclic(action.survey_start, action.survey_size)
-                )
+        constraints.append(
+            object_limit_in_range_constraint(
+                X,
+                best_survey.surveying_for,
+                num_found,
+                get_range_cyclic(best_survey.survey_start, best_survey.survey_size)
             )
+        )
 
-            cost = survey_cost(action)
-            time += cost
-            visible_range_start = (visible_range_start + cost) % NUM_SECTORS
+        cost = survey_cost(best_survey)
+        time += cost
+        visible_range_start = (visible_range_start + cost) % NUM_SECTORS
 
-            print(f"action: {action}, time: {time}")
+        print(f"action: {best_survey}, time: {time}")
+        print(f"{actual_information_content=}")
+        print("")
 
     return SearchResult(time, actions)
 
 
 def main():
-    solar_system: SolarSystem = generate_solar_system()
+    all_systems: list[SolarSystem] = generate_all_systems()
+    solar_system: SolarSystem = random.choice(all_systems)
 
     print("Board:")
     for i in range(0, NUM_SECTORS):
@@ -465,18 +490,18 @@ def main():
         ("most choices", num_distinct_results)
     ]:
         print(f"using strategy {name}")
-        search_result: SearchResult = find_planet_x(solar_system, evaluator)
+        search_result: SearchResult = find_planet_x(solar_system, evaluator, all_systems)
 
         print(search_result.actions[-1])
-        print(f"Found Planet X in:\n{search_result.time_cost}")
+        print(f"Found Planet X in: {search_result.time_cost} days")
+        print(f"num actions = {len(search_result.actions)}\n")
+        print("#" * 80)
 
         results[name] = search_result.time_cost
 
     for name, cost in results.items():
-        print(f"{name} - cost = {cost}")
+        print(f"{name} - time taken = {cost}")
 
 
 if __name__ == "__main__":
-    z3.set_option('smt.arith.random_initial_value', True)
-    z3.set_option('smt.random_seed', int(2 ** 32 * random.random()))
     main()
