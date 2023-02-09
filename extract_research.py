@@ -1,5 +1,6 @@
 import sys
 import json
+import re
 
 filenames = sys.argv[1:]
 
@@ -8,34 +9,46 @@ filenames = sys.argv[1:]
 # the same project with the same clues.
 project_name_to_result_list = {}
 
+
+def non_whitespace_words(line):
+    return [
+        word.strip()
+        for word in line.split(" ")
+        if len(word.strip()) > 0
+    ]
+
+
+def line_has_name(line):
+    name_regex = r"^[A-Z]1?:"
+    return re.match(name_regex, line)
+
+
+def line_has_clue(line):
+    words = non_whitespace_words(line)
+    return not line_has_name(line) and len(words) >= 2
+
+
+def line_is_interesting(line):
+    return line_has_name(line) or line_has_clue(line)
+
+
 def extract_research(lines: list[str]):
     letter_name_clue = []
     line_index = 0
 
-    while True:
-        if lines[line_index].startswith("X1"):
-            break
-        line_index += 1
-
-    def non_whitespace_words(line):
-        return [
-            word.strip()
-            for word in line.split(" ")
-            if len(word.strip()) > 0
-        ]
-
-
-    def extract_project_name() -> str:
+    def extract_project_name():
         nonlocal line_index
         start_line = lines[line_index]
         words = non_whitespace_words(start_line)
+        letter = words[0][:-1]
 
         # If the line ends in any of these, there are more words on the next two lines.
         if words[-1] in ["&", "Dwarf", "Gas"]:
             line_index += 2
             words += non_whitespace_words(lines[line_index])
 
-        return " ".join(words[1:])
+        line_index += 1
+        return letter, " ".join(words[1:])
 
     def extract_clue() -> str:
         nonlocal line_index
@@ -44,74 +57,45 @@ def extract_research(lines: list[str]):
         while True:
             line = lines[line_index]
             clue_lines.append(line.rstrip())
+            line_index += 1
             if line.endswith(".\n"):
                 break
-            line_index += 1
 
         return " ".join(clue_lines)
 
-    def skip_all_whitespace_or_single_letter():
+    def skip_until(cond):
         nonlocal line_index
-        if len(lines[line_index].strip()) <= 1:
+        while not cond(lines[line_index]):
             line_index += 1
 
-    # The reason we do this rather than a loop is that the change in the line index is different,
-    # and that the order is:
+    # The pdfminer output looks like:
     # X1 name/clue, A name/clue, B name/clue, C name/clue, F/E/D names, F/E/D clues
-    x1_name = extract_project_name()
-    line_index += 2
-    x1_clue = extract_clue()
 
-    line_index += 4
-    a_name = extract_project_name()
-    line_index += 2
-    a_clue = extract_clue()
+    completed_letters = set()
+    letter_and_name = []
 
-    line_index += 4
-    b_name = extract_project_name()
-    line_index += 1
-    skip_all_whitespace_or_single_letter()
-    b_clue = extract_clue()
+    skip_until(line_has_name)
+    while len(completed_letters) < 7:
+        skip_until(line_is_interesting)
 
-    line_index += 4
-    c_name = extract_project_name()
-    line_index += 2
-    c_clue = extract_clue()
+        line = lines[line_index]
+        if line_has_name(line):
+            letter, name = extract_project_name()
+            letter_and_name.append((letter, name))
 
-    line_index += 4
-    f_name = extract_project_name()
-
-    line_index += 2
-    e_name = extract_project_name()
-
-    line_index += 2
-    d_name = extract_project_name()
-
-    line_index += 2
-    f_clue = extract_clue()
-
-    line_index += 3
-    e_clue = extract_clue()
-
-    line_index += 3
-    d_clue = extract_clue()
-
-    letter_name_clue.append(["X1", x1_name, x1_clue])
-    letter_name_clue.append(["A", a_name, a_clue])
-    letter_name_clue.append(["B", b_name, b_clue])
-    letter_name_clue.append(["C", c_name, c_clue])
-    letter_name_clue.append(["D", d_name, d_clue])
-    letter_name_clue.append(["E", e_name, e_clue])
-    letter_name_clue.append(["F", f_name, f_clue])
+        elif line_has_clue(line):
+            letter, name = letter_and_name.pop(0)
+            clue = extract_clue()
+            letter_name_clue.append([letter, name, clue])
+            completed_letters.add(letter)
 
     return letter_name_clue
+
 
 research = []
 
 for filename in filenames:
-    print(filename)
     new_research = extract_research(open(filename, "r").readlines())
-    print(new_research)
     research.append(new_research)
 
 print(json.dumps(research))
