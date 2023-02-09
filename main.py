@@ -326,14 +326,14 @@ def expected_information_content_per_time(survey: Survey, systems: list[SolarSys
         f"{expected_information_content=}\n{time_cost=}"
 
 
-def num_distinct_results(survey: Survey, systems: list[z3.ModelRef]) -> float:
+def num_distinct_results_per_time(survey: Survey, systems: list[z3.ModelRef]) -> float:
     distinct_results = set()
 
     for system in systems:
         result = execute_action(survey, system).number_found
         distinct_results.add(result)
 
-    return survey, len(distinct_results), distinct_results
+    return survey, len(distinct_results)/survey_cost(survey), distinct_results
 
 
 def pick_best_survey(surveys: list[Survey],
@@ -486,7 +486,7 @@ def main():
 
     strategies = {
         "max information content": expected_information_content_per_time,
-        "most choices": num_distinct_results
+        "max num choices per time": num_distinct_results_per_time,
     }
 
     name_to_time_costs = {
@@ -522,10 +522,10 @@ def main():
         for name, cost in results.items():
             print_v(f"{name} - time taken = {cost}")
 
-        if run % 10 == 0:
+        if run % 10 == 9:
             print(".", end="", flush=True)
 
-        if run % 100 == 0:
+        if run % 100 == 99:
             print("")
             for name, costs in name_to_time_costs.items():
                 print(f"{name}: avg(time) = {sum(costs) / len(costs)}")
