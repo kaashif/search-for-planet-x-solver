@@ -46,33 +46,14 @@ class SurveyResult:
     number_found: int
 
 
-@dataclass
-class Target(Action):
-    targeted_sector: int
-
-
-@dataclass
-class TargetResult:
-    object_found: ObjectType
-
-
 # I don't actually plan to implement research since I'm not sure how the
 # information is generated or revealed.
-@dataclass
-class ResearchTopic(Action):
-    topic: int
-
 
 @dataclass
 class LocatePlanetX(Action):
     sector: int
     prev_sector_object: ObjectType
     next_sector_object: ObjectType
-
-
-@dataclass
-class LocatePlanetXResult:
-    correct: bool
 
 
 # 12 sectors is standard, 18 sectors is expert
@@ -333,7 +314,20 @@ def num_distinct_results_per_time(survey: Survey, systems: list[z3.ModelRef]) ->
         result = execute_action(survey, system).number_found
         distinct_results.add(result)
 
-    return survey, len(distinct_results)/survey_cost(survey), distinct_results
+    return survey, len(distinct_results) / survey_cost(survey), distinct_results
+
+
+def negative_expected_probability_per_time(survey, systems):
+    result_to_systems = system_by_survey_result(survey, systems)
+    num_systems = len(systems)
+    time_cost = survey_cost(survey)
+
+    neg_exp_prob = -1 * sum(
+        len(systems_with_result) ** 2
+        for systems_with_result in result_to_systems.values()
+    ) / (num_systems ** 2)
+
+    return survey, neg_exp_prob / time_cost, f"{neg_exp_prob=}, {time_cost=}"
 
 
 def pick_best_survey(surveys: list[Survey],
@@ -487,6 +481,7 @@ def main():
     strategies = {
         "max information content": expected_information_content_per_time,
         "max num choices per time": num_distinct_results_per_time,
+        "max exp neg prob per time": negative_expected_probability_per_time,
     }
 
     name_to_time_costs = {
