@@ -1,4 +1,4 @@
-#"The Search for Planet X" solver simulator
+#_The Search for Planet X_ solver simulator
 
 This repo contains code that:
 
